@@ -1,6 +1,7 @@
 import type { Note } from '../music/note';
 import { STANDARD, isPresetId } from '../music/presets';
 import { clampCapo, type Tuning } from '../music/tuning';
+import { DEFAULT_SENSITIVITY, SENSITIVITY_RANGE } from '../tuner/sensitivity';
 
 export const STORAGE_KEY = 'guitar-tuner';
 export const SCHEMA_VERSION = 1;
@@ -13,6 +14,8 @@ export interface Settings {
   useFlats: boolean;
   /** Hold a screen wake lock while listening. */
   keepAwake: boolean;
+  /** Mic sensitivity level, 1 (steadiest) … 5 (picks up quietest / most distant). */
+  sensitivity: number;
 }
 
 export const A4_RANGE = { min: 430, max: 450 } as const;
@@ -21,7 +24,13 @@ export const OCTAVE_RANGE = { min: 0, max: 8 } as const;
 export const MAX_STRINGS = 12;
 export const MAX_NAME_LENGTH = 40;
 
-export const DEFAULT_SETTINGS: Settings = { a4: 440, toleranceCents: 5, useFlats: false, keepAwake: true };
+export const DEFAULT_SETTINGS: Settings = {
+  a4: 440,
+  toleranceCents: 5,
+  useFlats: false,
+  keepAwake: true,
+  sensitivity: DEFAULT_SENSITIVITY,
+};
 
 export interface PersistedState {
   version: typeof SCHEMA_VERSION;
@@ -65,6 +74,9 @@ export function parseSettings(data: unknown): Settings {
     toleranceCents: numberIn(s.toleranceCents, TOLERANCE_RANGE.min, TOLERANCE_RANGE.max, DEFAULT_SETTINGS.toleranceCents),
     useFlats: typeof s.useFlats === 'boolean' ? s.useFlats : DEFAULT_SETTINGS.useFlats,
     keepAwake: typeof s.keepAwake === 'boolean' ? s.keepAwake : DEFAULT_SETTINGS.keepAwake,
+    sensitivity: Math.round(
+      numberIn(s.sensitivity, SENSITIVITY_RANGE.min, SENSITIVITY_RANGE.max, DEFAULT_SETTINGS.sensitivity),
+    ),
   };
 }
 

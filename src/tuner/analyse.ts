@@ -17,13 +17,13 @@ export interface AnalyserConfig {
   manualIndex: number;
   toleranceCents: number;
   a4: number;
+  /** Median filter length, in frames (set by the sensitivity level). */
+  smoothing: number;
 }
 
 export interface AnalyserOptions {
   /** Frames quieter than this are treated as silence. */
   rmsThreshold: number;
-  /** Median filter length, in frames. */
-  smoothing: number;
   /** Keep showing the last reading this long after the signal drops out. */
   holdMs: number;
   /** A silence longer than this starts a fresh smoothing window (new pluck). */
@@ -33,8 +33,11 @@ export interface AnalyserOptions {
 }
 
 export const DEFAULT_ANALYSER_OPTIONS: AnalyserOptions = {
-  rmsThreshold: 0.005,
-  smoothing: 5,
+  // −90 dBFS: only rejects (near-)digital silence. With auto-gain off, a phone mic can hear an
+  // unplugged electric guitar at −70 dBFS or below. YIN's periodicity check is what rejects noise
+  // (broadband and low-frequency rumble yield no pitch; see yin.test.ts), so a level gate any higher
+  // only throws away quiet strings.
+  rmsThreshold: 0.00003,
   holdMs: 1000,
   gapResetMs: 200,
   tunedHoldMs: 300,
@@ -148,7 +151,8 @@ export class TuningAnalyser {
     if (now - this.lastValidAt > this.options.gapResetMs) this.history = [];
     this.lastValidAt = now;
     this.history.push(freq);
-    if (this.history.length > this.options.smoothing) this.history.shift();
+    // `while`, not `if`: the window can shrink when the sensitivity level changes.
+    while (this.history.length > Math.max(1, this.config.smoothing)) this.history.shift();
     const reading = this.evaluate(median(this.history));
 
     let tuned = this.state.tuned;

@@ -1,4 +1,8 @@
+import type { RefObject } from 'preact';
 import { A4_RANGE, TOLERANCE_RANGE, type Settings as SettingsData } from '../state/storage';
+import type { PitchFrame } from '../tuner/analyse';
+import { SENSITIVITY_RANGE } from '../tuner/sensitivity';
+import { Diagnostics } from './Diagnostics';
 import { Sheet } from './Sheet';
 import { Stepper } from './Stepper';
 import type { AudioInfo } from './useTuner';
@@ -6,15 +10,45 @@ import type { AudioInfo } from './useTuner';
 interface SettingsProps {
   settings: SettingsData;
   audioInfo: AudioInfo;
+  lastFrameRef: RefObject<PitchFrame | null>;
+  listening: boolean;
   onChange(patch: Partial<SettingsData>): void;
   onClose(): void;
 }
 
 const wakeLockSupported = typeof navigator !== 'undefined' && 'wakeLock' in navigator;
 
-export function Settings({ settings, audioInfo, onChange, onClose }: SettingsProps) {
+export function Settings({ settings, audioInfo, lastFrameRef, listening, onChange, onClose }: SettingsProps) {
   return (
     <Sheet title="Settings" onClose={onClose}>
+      <div class="setting-row stacked">
+        <div class="setting-heading">
+          <h3>Mic sensitivity</h3>
+          <span class="setting-value">
+            {settings.sensitivity} / {SENSITIVITY_RANGE.max}
+          </span>
+        </div>
+        <input
+          type="range"
+          class="slider"
+          aria-label="Mic sensitivity"
+          aria-valuetext={`${settings.sensitivity} of ${SENSITIVITY_RANGE.max}`}
+          min={SENSITIVITY_RANGE.min}
+          max={SENSITIVITY_RANGE.max}
+          step={1}
+          value={settings.sensitivity}
+          onInput={(e) => onChange({ sensitivity: Number(e.currentTarget.value) })}
+        />
+        <div class="slider-labels" aria-hidden="true">
+          <span>Steadier</span>
+          <span>Hears further</span>
+        </div>
+        <p class="muted">
+          Raise it if you have to hold the phone very close. Higher settings hear quieter, more distant guitars, at the
+          cost of a slightly slower, less steady needle.
+        </p>
+      </div>
+
       <div class="setting-row">
         <div>
           <h3>Reference pitch</h3>
@@ -81,12 +115,10 @@ export function Settings({ settings, audioInfo, onChange, onClose }: SettingsPro
         />
       </div>
 
-      <p class="about muted">
-        Audio:{' '}
-        {audioInfo.engine
-          ? `${audioInfo.engine === 'worklet' ? 'AudioWorklet' : 'AnalyserNode fallback'} · ${audioInfo.sampleRate} Hz`
-          : 'not started'}
-      </p>
+      <section class="sheet-section">
+        <h3>Diagnostics</h3>
+        <Diagnostics audioInfo={audioInfo} lastFrameRef={lastFrameRef} listening={listening} />
+      </section>
     </Sheet>
   );
 }

@@ -1,7 +1,14 @@
 import type { PitchFrame } from '../tuner/analyse';
 import workletUrl from './pitch-worklet.ts?worker&url';
-import { BUFFER_SIZE, HOP_SIZE, PITCH_PROCESSOR_NAME, type PitchProcessorOptions } from './protocol';
-import { YinDetector, rms } from './yin';
+import {
+  BUFFER_SIZE,
+  HOP_SIZE,
+  INPUT_LOWPASS_HZ,
+  PITCH_PROCESSOR_NAME,
+  type PitchProcessorMessage,
+  type PitchProcessorOptions,
+} from './protocol';
+import { DEFAULT_YIN_OPTIONS, YinDetector, rms } from './yin';
 
 export type MicErrorKind = 'denied' | 'no-device' | 'busy' | 'insecure' | 'unsupported' | 'suspended' | 'aborted' | 'unknown';
 
@@ -50,11 +57,35 @@ interface WebkitWindow {
   webkitAudioContext?: typeof AudioContext;
 }
 
-const MIC_CONSTRAINTS: MediaStreamConstraints = {
-  // Voice processing distorts pitch and gates quiet notes, so turn all of it off.
-  audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-  video: false,
-};
+// Voice processing is tuned for speech: noise suppression treats a sustained string as background
+// noise and fades it out, and AGC pumps the level. Ask for all of it off.
+const PROCESSING_OFF: MediaTrackConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+const MIC_CONSTRAINTS: MediaStreamConstraints = { audio: PROCESSING_OFF, video: false };
+
+/** What the browser reports it actually applied; undefined = not reported (e.g. Safari for some flags). */
+export interface MicProcessing {
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+}
+
+function readProcessing(track: MediaStreamTrack): MicProcessing {
+  const { echoCancellation, noiseSuppression, autoGainControl } = track.getSettings();
+  // Newer browsers may report an echo-cancellation mode ("all" / "remote-only") instead of true.
+  return {
+    echoCancellation: typeof echoCancellation === 'string' ? true : echoCancellation,
+    noiseSuppression,
+    autoGainControl,
+  };
+}
+
+/** getUserMedia constraints are only "ideal"; if any processing stayed on, ask once more via applyConstraints. */
+async function disableProcessing(track: MediaStreamTrack): Promise<MicProcessing> {
+  const initial = readProcessing(track);
+  if (!Object.values(initial).some(Boolean)) return initial;
+  await track.applyConstraints(PROCESSING_OFF).catch(() => undefined);
+  return readProcessing(track);
+}
 
 const RESUME_TIMEOUT_MS = 1500;
 
@@ -64,18 +95,37 @@ async function resumeWithTimeout(ctx: AudioContext, pending?: Promise<void>): Pr
   await Promise.race([(pending ?? ctx.resume()).catch(() => undefined), timeout]);
 }
 
+/** A running detector (AudioWorklet or AnalyserNode fallback). */
+interface DetectorHandle {
+  setThreshold(threshold: number): void;
+  detach(): void;
+}
+
 /** Mic → pitch frames. Uses an AudioWorklet, falling back to polling an AnalyserNode. */
 export class PitchSource {
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private disconnect: (() => void) | null = null;
+  private detector: DetectorHandle | null = null;
+  private threshold = DEFAULT_YIN_OPTIONS.threshold;
   private generation = 0;
   private activeEngine: AudioEngine | null = null;
+  private activeProcessing: MicProcessing | null = null;
 
   constructor(private readonly callbacks: PitchSourceCallbacks) {}
 
+  /** YIN acceptance threshold (the sensitivity). Applies immediately if already listening. */
+  setThreshold(threshold: number): void {
+    this.threshold = threshold;
+    this.detector?.setThreshold(threshold);
+  }
+
   get engine(): AudioEngine | null {
     return this.activeEngine;
+  }
+
+  get processing(): MicProcessing | null {
+    return this.activeProcessing;
   }
 
   get sampleRate(): number | null {
@@ -100,6 +150,7 @@ export class PitchSource {
     const resuming = ctx.resume();
     let stream: MediaStream | null = null;
     let disconnect: (() => void) | null = null;
+    let detector: DetectorHandle | null = null;
     const cleanUp = () => {
       disconnect?.();
       stream?.getTracks().forEach((t) => t.stop());
@@ -115,11 +166,27 @@ export class PitchSource {
       this.throwIfStale(token);
       if (ctx.state !== 'running') throw new MicError('suspended', `AudioContext is ${ctx.state}.`);
 
-      const source = ctx.createMediaStreamSource(stream);
-      disconnect = await this.connectWorklet(ctx, source);
+      const track = stream.getAudioTracks()[0];
+      const processing = track ? await disableProcessing(track) : null;
       this.throwIfStale(token);
-      this.activeEngine = disconnect ? 'worklet' : 'analyser';
-      disconnect ??= this.connectAnalyser(ctx, source);
+      this.activeProcessing = processing;
+
+      // mic → low-pass (strips hiss above any guitar pitch) → detector
+      const source = ctx.createMediaStreamSource(stream);
+      const lowpass = ctx.createBiquadFilter();
+      lowpass.type = 'lowpass';
+      lowpass.frequency.value = INPUT_LOWPASS_HZ;
+      source.connect(lowpass);
+      const worklet = await this.connectWorklet(ctx, lowpass);
+      const active = worklet ?? this.connectAnalyser(ctx, lowpass);
+      detector = active;
+      disconnect = () => {
+        active.detach();
+        lowpass.disconnect();
+        source.disconnect();
+      };
+      this.throwIfStale(token);
+      this.activeEngine = worklet ? 'worklet' : 'analyser';
     } catch (error) {
       cleanUp();
       throw toMicError(error);
@@ -128,6 +195,7 @@ export class PitchSource {
     this.ctx = ctx;
     this.stream = stream;
     this.disconnect = disconnect;
+    this.detector = detector;
 
     // iOS suspends or "interrupts" the context for calls, Siri, other audio apps and screen lock.
     ctx.onstatechange = () => {
@@ -141,8 +209,10 @@ export class PitchSource {
     const ctx = this.ctx;
     this.ctx = null;
     this.activeEngine = null;
+    this.activeProcessing = null;
     this.disconnect?.();
     this.disconnect = null;
+    this.detector = null;
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     if (ctx) {
@@ -161,7 +231,7 @@ export class PitchSource {
     if (token !== this.generation) throw new MicError('aborted', 'Stopped while starting.');
   }
 
-  private async connectWorklet(ctx: AudioContext, source: MediaStreamAudioSourceNode): Promise<(() => void) | null> {
+  private async connectWorklet(ctx: AudioContext, input: AudioNode): Promise<DetectorHandle | null> {
     if (!ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') return null;
     try {
       await ctx.audioWorklet.addModule(workletUrl);
@@ -169,7 +239,11 @@ export class PitchSource {
       console.warn('AudioWorklet unavailable, falling back to AnalyserNode', error);
       return null;
     }
-    const processorOptions: PitchProcessorOptions = { bufferSize: BUFFER_SIZE, hopSize: HOP_SIZE };
+    const processorOptions: PitchProcessorOptions = {
+      bufferSize: BUFFER_SIZE,
+      hopSize: HOP_SIZE,
+      yin: { threshold: this.threshold },
+    };
     const node = new AudioWorkletNode(ctx, PITCH_PROCESSOR_NAME, {
       numberOfInputs: 1,
       numberOfOutputs: 1,
@@ -180,27 +254,32 @@ export class PitchSource {
       processorOptions,
     });
     node.port.onmessage = (event: MessageEvent<PitchFrame>) => this.callbacks.onFrame(event.data);
-    source.connect(node);
+    input.connect(node);
     // The processor only outputs silence, but nodes must reach the destination to be pulled reliably.
     node.connect(ctx.destination);
-    return () => {
-      node.port.onmessage = null;
-      source.disconnect();
-      node.disconnect();
+    return {
+      setThreshold: (threshold) => {
+        const message: PitchProcessorMessage = { type: 'setThreshold', threshold };
+        node.port.postMessage(message);
+      },
+      detach: () => {
+        node.port.onmessage = null;
+        node.disconnect();
+      },
     };
   }
 
-  private connectAnalyser(ctx: AudioContext, source: MediaStreamAudioSourceNode): () => void {
+  private connectAnalyser(ctx: AudioContext, input: AudioNode): DetectorHandle {
     const analyser = ctx.createAnalyser();
     analyser.fftSize = BUFFER_SIZE;
     analyser.smoothingTimeConstant = 0;
     const mute = ctx.createGain();
     mute.gain.value = 0;
-    source.connect(analyser);
+    input.connect(analyser);
     analyser.connect(mute);
     mute.connect(ctx.destination);
 
-    const detector = new YinDetector(BUFFER_SIZE, ctx.sampleRate);
+    const detector = new YinDetector(BUFFER_SIZE, ctx.sampleRate, { threshold: this.threshold });
     const buffer = new Float32Array(BUFFER_SIZE);
     let frameId = 0;
     const tick = () => {
@@ -215,11 +294,13 @@ export class PitchSource {
     };
     frameId = requestAnimationFrame(tick);
 
-    return () => {
-      cancelAnimationFrame(frameId);
-      source.disconnect();
-      analyser.disconnect();
-      mute.disconnect();
+    return {
+      setThreshold: (threshold) => detector.setThreshold(threshold),
+      detach: () => {
+        cancelAnimationFrame(frameId);
+        analyser.disconnect();
+        mute.disconnect();
+      },
     };
   }
 }

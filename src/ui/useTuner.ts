@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
-import { MicError, PitchSource, toMicError, type AudioEngine } from '../audio/mic';
-import { TuningAnalyser, type AnalyserConfig, type TunerState } from '../tuner/analyse';
+import { MicError, PitchSource, toMicError, type AudioEngine, type MicProcessing } from '../audio/mic';
+import { TuningAnalyser, type AnalyserConfig, type PitchFrame, type TunerState } from '../tuner/analyse';
 
 /** idle → starting → listening; paused after backgrounding/interruption (needs a tap to resume). */
 export type TunerStatus = 'idle' | 'starting' | 'listening' | 'paused' | 'error';
@@ -8,9 +8,16 @@ export type TunerStatus = 'idle' | 'starting' | 'listening' | 'paused' | 'error'
 export interface AudioInfo {
   engine: AudioEngine | null;
   sampleRate: number | null;
+  processing: MicProcessing | null;
 }
 
-export function useTuner(config: AnalyserConfig, keepAwake: boolean) {
+export interface TunerOptions {
+  keepAwake: boolean;
+  /** Detector acceptance threshold, from the sensitivity level. */
+  yinThreshold: number;
+}
+
+export function useTuner(config: AnalyserConfig, { keepAwake, yinThreshold }: TunerOptions) {
   const analyserRef = useRef<TuningAnalyser | null>(null);
   analyserRef.current ??= new TuningAnalyser(config);
   const analyser = analyserRef.current;
@@ -19,17 +26,27 @@ export function useTuner(config: AnalyserConfig, keepAwake: boolean) {
   const [state, setState] = useState<TunerState>(analyser.current);
   const [status, setStatus] = useState<TunerStatus>('idle');
   const [error, setError] = useState<MicError | null>(null);
-  const [audioInfo, setAudioInfo] = useState<AudioInfo>({ engine: null, sampleRate: null });
+  const [audioInfo, setAudioInfo] = useState<AudioInfo>({ engine: null, sampleRate: null, processing: null });
+  /** Latest raw detector frame, for diagnostics. A ref so frames don't re-render the app. */
+  const lastFrameRef = useRef<PitchFrame | null>(null);
 
-  const { targets, mode, manualIndex, toleranceCents, a4 } = config;
+  const { targets, mode, manualIndex, toleranceCents, a4, smoothing } = config;
   useEffect(() => {
-    setState(analyser.configure({ targets, mode, manualIndex, toleranceCents, a4 }));
-  }, [analyser, targets, mode, manualIndex, toleranceCents, a4]);
+    setState(analyser.configure({ targets, mode, manualIndex, toleranceCents, a4, smoothing }));
+  }, [analyser, targets, mode, manualIndex, toleranceCents, a4, smoothing]);
+
+  // A ref so `start` (created once) uses the current value; the effect updates a live session.
+  const thresholdRef = useRef(yinThreshold);
+  thresholdRef.current = yinThreshold;
+  useEffect(() => {
+    sourceRef.current?.setThreshold(yinThreshold);
+  }, [yinThreshold]);
 
   const stop = useCallback(
     (next: TunerStatus) => {
       sourceRef.current?.stop();
       sourceRef.current = null;
+      lastFrameRef.current = null;
       setState(analyser.reset());
       setStatus(next);
     },
@@ -41,6 +58,7 @@ export function useTuner(config: AnalyserConfig, keepAwake: boolean) {
     if (sourceRef.current) return;
     const source = new PitchSource({
       onFrame: (frame) => {
+        lastFrameRef.current = frame;
         const next = analyser.push(frame, performance.now());
         if (next.justTuned !== null) navigator.vibrate?.(40);
         setState(next);
@@ -49,13 +67,14 @@ export function useTuner(config: AnalyserConfig, keepAwake: boolean) {
         if (sourceRef.current === source) stop('paused');
       },
     });
+    source.setThreshold(thresholdRef.current);
     sourceRef.current = source;
     setError(null);
     setStatus('starting');
     source.start().then(
       () => {
         if (sourceRef.current !== source) return;
-        setAudioInfo({ engine: source.engine, sampleRate: source.sampleRate });
+        setAudioInfo({ engine: source.engine, sampleRate: source.sampleRate, processing: source.processing });
         setStatus('listening');
       },
       (reason: unknown) => {
@@ -106,5 +125,5 @@ export function useTuner(config: AnalyserConfig, keepAwake: boolean) {
     };
   }, [status, keepAwake]);
 
-  return { state, status, error, audioInfo, start };
+  return { state, status, error, audioInfo, lastFrameRef, start };
 }

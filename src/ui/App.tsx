@@ -4,6 +4,7 @@ import { STANDARD } from '../music/presets';
 import { formatStrings, tuningLabel, withCapo, type Tuning } from '../music/tuning';
 import { loadState, saveState, type KeyValueStore } from '../state/storage';
 import { currentTuning, draftFrom, initialState, reducer, toPersisted } from '../state/store';
+import { sensitivityProfile } from '../tuner/sensitivity';
 import { Announcer } from './Announcer';
 import { Gauge } from './Gauge';
 import { ChevronDownIcon, GearIcon } from './icons';
@@ -42,9 +43,10 @@ export function App() {
   const notes = useMemo(() => withCapo(tuning.strings, capo), [tuning, capo]);
   const targets = useMemo(() => notes.map((n) => frequency(n, settings.a4)), [notes, settings.a4]);
 
-  const { state: tuner, status, error, audioInfo, start } = useTuner(
-    { targets, mode, manualIndex: manualString, toleranceCents: settings.toleranceCents, a4: settings.a4 },
-    settings.keepAwake,
+  const { yinThreshold, smoothing } = sensitivityProfile(settings.sensitivity);
+  const { state: tuner, status, error, audioInfo, lastFrameRef, start } = useTuner(
+    { targets, mode, manualIndex: manualString, toleranceCents: settings.toleranceCents, a4: settings.a4, smoothing },
+    { keepAwake: settings.keepAwake, yinThreshold },
   );
 
   const [sheet, setSheet] = useState<SheetState>(null);
@@ -145,6 +147,8 @@ export function App() {
         <Settings
           settings={settings}
           audioInfo={audioInfo}
+          lastFrameRef={lastFrameRef}
+          listening={listening}
           onChange={(patch) => dispatch({ type: 'updateSettings', settings: patch })}
           onClose={closeSheet}
         />

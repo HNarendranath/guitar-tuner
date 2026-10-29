@@ -57,6 +57,10 @@ Notes:
 
 - **YIN** computes the difference function via FFT cross-correlation (O(N log N), ~0.4 ms per frame on a desktop)
   so the audio thread stays light on a phone. On synthetic tones it is accurate to well under ±0.1 cent.
+- **Mic sensitivity** (Settings, 1–5, default 3) trades steadiness for reach: each level raises the YIN threshold
+  and lengthens the median filter (`src/tuner/sensitivity.ts`). An octave-down guard in YIN stops noisy, distant notes
+  reading an octave low. The input is low-passed at 1.5 kHz to strip hiss, and the level gate only rejects
+  digital silence, so quiet sources such as an unplugged electric still register.
 - **Detection range is 50–1000 Hz** (slightly wider than the low E, to cover drop tunings down to A1).
   The custom tuning editor warns if a string falls outside it.
 - **iOS audio unlock**: the AudioContext is created and resumed synchronously inside the "Tap to start" handler,
@@ -71,6 +75,10 @@ Notes:
 Run each in **Safari** and in the **home-screen app**, with a real guitar and a reference tuner:
 
 - [ ] All six standard strings read within ±2 cents of the reference tuner.
+- [ ] Settings › Diagnostics: a pluck lifts the input level at least ~15 dB above silence, a pitch appears with
+      clarity near 1, and noise suppression / echo cancellation / auto gain report `off` (or `not reported` on Safari).
+      If speech works but held notes fade out, check Control Center › Mic Mode is set to Standard.
+- [ ] Unplugged electric: works with the bottom of the phone a few cm from the strings (likely only −70 dBFS or so).
 - [ ] Settings › Audio shows `AudioWorklet` and the sample rate (expect 48000 Hz). A sharp/flat offset of ~147 cents
       on every string would point to a sample-rate mismatch between the mic and the AudioContext.
 - [ ] The needle is steady on a sustained note and follows a new string quickly.

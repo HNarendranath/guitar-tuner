@@ -1,5 +1,5 @@
 import type { PitchFrame } from '../tuner/analyse';
-import { PITCH_PROCESSOR_NAME, type PitchProcessorOptions } from './protocol';
+import { PITCH_PROCESSOR_NAME, type PitchProcessorMessage, type PitchProcessorOptions } from './protocol';
 import { YinDetector, rms } from './yin';
 
 // AudioWorkletGlobalScope members, which aren't part of lib.dom.
@@ -30,6 +30,9 @@ class PitchProcessor extends AudioWorkletProcessor {
     this.window = new Float32Array(bufferSize);
     this.hopSize = hopSize;
     this.detector = new YinDetector(bufferSize, sampleRate, yin);
+    this.port.onmessage = (event: MessageEvent<PitchProcessorMessage>) => {
+      if (event.data.type === 'setThreshold') this.detector.setThreshold(event.data.threshold);
+    };
   }
 
   process(inputs: Float32Array[][]): boolean {

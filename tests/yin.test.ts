@@ -1,44 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { FFT } from '../src/audio/fft';
+import { INPUT_LOWPASS_HZ } from '../src/audio/protocol';
 import { YinDetector, rms } from '../src/audio/yin';
 import { cents } from '../src/music/note';
+import { BUFFER, biquadLowpass, lowpassNoise, random, synth, type SynthOptions } from './signals';
 
-const BUFFER = 4096;
 const SAMPLE_RATES = [44100, 48000];
 const STRINGS = [82.41, 110, 146.83, 196, 246.94, 329.63];
-
-/** Deterministic PRNG (mulberry32) so failures are reproducible. */
-function random(seed: number): () => number {
-  return () => {
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-interface SynthOptions {
-  harmonics?: number[];
-  amplitude?: number;
-  decaySeconds?: number;
-  seed?: number;
-}
-
-function synth(freq: number, sampleRate: number, { harmonics = [1], amplitude = 0.5, decaySeconds, seed = 1 }: SynthOptions = {}) {
-  const rand = random(seed);
-  const phases = harmonics.map(() => rand() * 2 * Math.PI);
-  const out = new Float32Array(BUFFER);
-  for (let i = 0; i < BUFFER; i++) {
-    const t = i / sampleRate;
-    let v = 0;
-    harmonics.forEach((a, k) => {
-      v += a * Math.sin(2 * Math.PI * freq * (k + 1) * t + phases[k]!);
-    });
-    const env = decaySeconds ? Math.exp(-t / decaySeconds) : 1;
-    out[i] = amplitude * env * v;
-  }
-  return out;
-}
 
 function naiveDifference(x: Float32Array, window: number, tauMax: number): number[] {
   const d: number[] = [];
@@ -143,6 +111,32 @@ describe('YIN pitch detection', () => {
     const rand = random(3);
     const noise = Float32Array.from({ length: BUFFER }, () => rand() * 2 - 1);
     expect(new YinDetector(BUFFER, 48000).detect(noise)).toBeNull();
+  });
+
+  // The analyser's level gate only rejects digital silence, so the detector itself must reject
+  // background noise, including the low-frequency rumble most likely to look periodic.
+  it('returns null for low-frequency rumble and coloured noise', () => {
+    const detector = new YinDetector(BUFFER, 48000);
+    for (const cutoffHz of [60, 100, 200, 400]) {
+      for (let seed = 1; seed <= 10; seed++) {
+        expect(detector.detect(lowpassNoise(cutoffHz, 0.0003, seed)), `${cutoffHz} Hz, seed ${seed}`).toBeNull();
+      }
+    }
+  });
+
+  it('detects a quiet note (−70 dBFS, unplugged electric) 15 dB above broadband noise, after the input low-pass', () => {
+    const detector = new YinDetector(BUFFER, 48000);
+    const noiseRms = 0.0003 / 10 ** (15 / 20);
+    const errors: number[] = [];
+    for (let seed = 1; seed <= 20; seed++) {
+      const x = synth(110, 48000, { harmonics: [1, 0.6, 0.4, 0.25, 0.15], amplitude: 1, seed });
+      const scale = 0.0003 / rms(x);
+      const n = lowpassNoise(null, noiseRms, seed);
+      const filtered = biquadLowpass(x.map((v, i) => v * scale + n[i]!), INPUT_LOWPASS_HZ, 48000);
+      const result = detector.detect(filtered);
+      errors.push(Math.abs(cents(result!.frequency, 110)));
+    }
+    expect(Math.max(...errors)).toBeLessThan(3);
   });
 
   it('reports high clarity for a clean tone', () => {

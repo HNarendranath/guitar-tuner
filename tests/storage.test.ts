@@ -27,7 +27,7 @@ const custom = { id: 'custom:1', name: 'Open D', strings: STANDARD.strings.map((
 const valid: PersistedState = {
   version: 1,
   customTunings: [custom],
-  settings: { a4: 442, toleranceCents: 3, useFlats: true, keepAwake: false },
+  settings: { a4: 442, toleranceCents: 3, useFlats: true, keepAwake: false, sensitivity: 4 },
   lastTuningId: 'custom:1',
   lastCapo: 4,
 };
@@ -73,6 +73,13 @@ describe('storage', () => {
     const state = parseState({ ...valid, settings: { a4: 500, toleranceCents: 'x', useFlats: 1 }, lastCapo: 99 });
     expect(state.settings).toEqual({ ...DEFAULT_SETTINGS, a4: 450 });
     expect(state.lastCapo).toBe(12);
+    expect(parseState({ ...valid, settings: { sensitivity: 9 } }).settings.sensitivity).toBe(5);
+    expect(parseState({ ...valid, settings: { sensitivity: 1.6 } }).settings.sensitivity).toBe(2);
+  });
+
+  it('gives settings saved before sensitivity existed the default level', () => {
+    const { sensitivity: _, ...older } = valid.settings;
+    expect(parseState({ ...valid, settings: older }).settings.sensitivity).toBe(DEFAULT_SETTINGS.sensitivity);
   });
 
   it('reports failure when storage throws (quota / private mode)', () => {

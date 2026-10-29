@@ -20,6 +20,7 @@ const config = (overrides: Partial<AnalyserConfig> = {}): AnalyserConfig => ({
   manualIndex: 0,
   toleranceCents: 5,
   a4: 440,
+  smoothing: 5,
   ...overrides,
 });
 
@@ -72,9 +73,18 @@ describe('TuningAnalyser', () => {
     expect(last.reading!.cents).toBeCloseTo(1200 * Math.log2(108 / TARGETS[0]!), 6);
   });
 
-  it('ignores frames below the RMS gate', () => {
-    const { last } = feed(new TuningAnalyser(config()), repeat(tone(110, 0.001), 5));
+  it('ignores frames below the RMS gate (digital silence)', () => {
+    const { last } = feed(new TuningAnalyser(config()), repeat(tone(110, 0.00001), 5));
     expect(last.reading).toBeNull();
+  });
+
+  it('accepts quiet guitars on a raw (no auto-gain) phone mic', () => {
+    // Regression: earlier −46 and −60 dBFS gates dropped real strings.
+    // ≈ −49 dBFS: acoustic at arm's length; ≈ −75 dBFS: unplugged electric.
+    for (const rms of [0.0035, 0.00018]) {
+      const { last } = feed(new TuningAnalyser(config()), repeat(tone(110, rms), 5));
+      expect(last.reading?.stringIndex).toBe(1);
+    }
   });
 
   it('median-smooths octave errors and outliers', () => {
@@ -117,7 +127,7 @@ describe('TuningAnalyser', () => {
 
   it('does not mark a string tuned when it only passes through tolerance', () => {
     const frames = [-20, -12, -4, 3, 10, 18].map((c) => tone(detune(110, c)));
-    const { last } = feed(new TuningAnalyser(config({}), { smoothing: 1 }), frames);
+    const { last } = feed(new TuningAnalyser(config({ smoothing: 1 })), frames);
     expect(last.tuned[1]).toBe(false);
   });
 

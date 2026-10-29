@@ -10,6 +10,12 @@ export interface YinOptions {
   threshold: number;
   minFrequency: number;
   maxFrequency: number;
+  /**
+   * Octave-down guard. Noise can lift the true period's dip just above the threshold while a
+   * multiple of it (an octave or a twelfth lower) dips below. If the dip at period/2 or period/3
+   * is within this much of the chosen one, the shorter period wins. 0 disables the check.
+   */
+  subharmonicMargin: number;
 }
 
 export interface PitchEstimate {
@@ -19,9 +25,10 @@ export interface PitchEstimate {
 }
 
 export const DEFAULT_YIN_OPTIONS: YinOptions = {
-  threshold: 0.12,
+  threshold: 0.15,
   minFrequency: 50,
   maxFrequency: 1000,
+  subharmonicMargin: 0.1,
 };
 
 export function rms(buffer: ArrayLike<number>): number {
@@ -77,6 +84,11 @@ export class YinDetector {
     this.energy = new Float64Array(bufferSize + 1);
     this.diff = new Float64Array(this.tauMax + 1);
     this.cmndf = new Float64Array(this.tauMax + 1);
+  }
+
+  /** Changes the acceptance threshold (sensitivity) without reallocating. */
+  setThreshold(threshold: number): void {
+    this.options.threshold = threshold;
   }
 
   /**
@@ -144,9 +156,34 @@ export class YinDetector {
       }
     }
     if (tau < 0) return null;
+    tau = this.preferShorterPeriod(tau);
 
     // Step 5: parabolic interpolation on the raw difference function, whose minimum sits at the true period.
     const period = tau < tauMax ? tau + parabolicOffset(d[tau - 1], d[tau], d[tau + 1]) : tau;
     return { frequency: this.sampleRate / period, clarity: 1 - cmndf[tau] };
+  }
+
+  /** See `YinOptions.subharmonicMargin`. Repeats so that e.g. 4× the period steps down to 2× and then 1×. */
+  private preferShorterPeriod(tau: number): number {
+    const { cmndf, tauMin } = this;
+    const margin = this.options.subharmonicMargin;
+    if (margin <= 0) return tau;
+    for (let step = 0; step < 4; step++) {
+      let next = -1;
+      for (const divisor of [2, 3]) {
+        const centre = Math.round(tau / divisor);
+        if (centre - 2 < tauMin) continue;
+        // The sub-period's dip lies within a sample or so of tau / divisor; take the deepest point nearby.
+        let best = centre;
+        for (let t = centre - 2; t <= centre + 2; t++) if (cmndf[t] < cmndf[best]) best = t;
+        if (cmndf[best] < cmndf[tau] + margin) {
+          next = best;
+          break;
+        }
+      }
+      if (next < 0) break;
+      tau = next;
+    }
+    return tau;
   }
 }
